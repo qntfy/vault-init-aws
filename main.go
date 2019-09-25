@@ -29,12 +29,21 @@ var (
 	s3BucketName  string
 	httpClient    http.Client
 	kmsKeyId      string
+
+	vaultSecretShares      int
+	vaultSecretThreshold   int
+	vaultStoredShares      int
+	vaultRecoveryShares    int
+	vaultRecoveryThreshold int
 )
 
 // InitRequest holds a Vault init request.
 type InitRequest struct {
 	SecretShares    int `json:"secret_shares"`
 	SecretThreshold int `json:"secret_threshold"`
+	StoredShares      int `json:"stored_shares"`
+	RecoveryShares    int `json:"recovery_shares"`
+	RecoveryThreshold int `json:"recovery_threshold"`
 }
 
 // InitResponse holds a Vault init response.
@@ -87,9 +96,20 @@ func main() {
 	if kmsKeyId == "" {
 		log.Fatal("KMS_KEY_ID must be set and not empty")
 	}
-	
-	timeout := time.Duration(2 * time.Second)
-	
+
+	vaultSecretShares = intFromEnv("VAULT_SECRET_SHARES", 5)
+	vaultSecretThreshold = intFromEnv("VAULT_SECRET_THRESHOLD", 3)
+
+	vaultAutoUnseal := boolFromEnv("VAULT_AUTO_UNSEAL", true)
+
+	if vaultAutoUnseal {
+		vaultStoredShares = intFromEnv("VAULT_STORED_SHARES", 1)
+		vaultRecoveryShares = intFromEnv("VAULT_RECOVERY_SHARES", 1)
+		vaultRecoveryThreshold = intFromEnv("VAULT_RECOVERY_THRESHOLD", 1)
+	}
+
+	timeout := time.Duration(40 * time.Second)
+
 	httpClient = http.Client{
 		Timeout: timeout,
 		Transport: &http.Transport{
@@ -117,12 +137,19 @@ func main() {
 		case 429:
 			log.Println("Vault is unsealed and in standby mode.")
 		case 501:
-			log.Println("Vault is not initialized. Initializing and unsealing...")
+			log.Println("Vault is not initialized.")
+			log.Println("Initializing...")
 			initialize()
-			unseal()
+			if !vaultAutoUnseal {
+				log.Println("Unsealing...")
+				unseal()
+			}
 		case 503:
-			log.Println("Vault is sealed. Unsealing...")
-			unseal()
+			log.Println("Vault is sealed.")
+			if !vaultAutoUnseal {
+				log.Println("Unsealing...")
+				unseal()
+			}
 		default:
 			log.Printf("Vault is in an unknown state. Status code: %d", response.StatusCode)
 		}
@@ -134,8 +161,11 @@ func main() {
 
 func initialize() {
 	initRequest := InitRequest{
-		SecretShares:    5,
-		SecretThreshold: 3,
+		SecretShares:      vaultSecretShares,
+		SecretThreshold:   vaultSecretThreshold,
+		StoredShares:      vaultStoredShares,
+		RecoveryShares:    vaultRecoveryShares,
+		RecoveryThreshold: vaultRecoveryThreshold,
 	}
 
 	initRequestData, err := json.Marshal(&initRequest)
@@ -336,4 +366,28 @@ func unsealOne(key string) (bool, error) {
 	}
 
 	return false, nil
+}
+
+func boolFromEnv(env string, def bool) bool {
+	val := os.Getenv(env)
+	if val == "" {
+		return def
+	}
+	b, err := strconv.ParseBool(val)
+	if err != nil {
+		log.Fatalf("failed to parse %q: %s", env, err)
+	}
+	return b
+}
+
+func intFromEnv(env string, def int) int {
+	val := os.Getenv(env)
+	if val == "" {
+		return def
+	}
+	i, err := strconv.Atoi(val)
+	if err != nil {
+		log.Fatalf("failed to parse %q: %s", env, err)
+	}
+	return i
 }
